@@ -1,0 +1,9 @@
+[submodule "libberdip"]
+	path = libberdip
+	url = git@github.com:scryver/libberdip
+[submodule "xfloat"]
+	path = xfloat
+	url = git@github.com:scryver/xfloat
+[submodule "sound-things"]
+	path = sound-things
+	url = git@github.com:scryver/sound-things

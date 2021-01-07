@@ -114,6 +114,13 @@ load_or_create_coefs(String basename, u32 coefCount, u32 sampleFreq, u32 cutoffF
         result = coefs64;
     }
     
+    f64 sum = 0.0;
+    for (u32 i = 0; i < coefCount; ++i)
+    {
+        sum += result[i];
+    }
+    fprintf(stdout, "Coef result: %f\n", sum);
+    
     return result;
 }
 

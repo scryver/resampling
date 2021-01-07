@@ -421,7 +421,7 @@ int main(int argc, char **argv)
                 INVALID_DEFAULT_CASE;
             }
             
-#if 0
+#if 1
             {
                 u32 chunkSize = 4096;
                 u32 chunkCount = inputCount / chunkSize;

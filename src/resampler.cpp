@@ -151,6 +151,45 @@ resample(Resampler *resampler, u32 inputCount, f64 *input, u32 outputCount, f64 
 }
 
 internal void
+resample_2ch_interleaved(Resampler *resampler, u32 inputCount, f64 *input, u32 outputCount, f64 *output)
+{
+    i_expect(resampler->channelCount == 2);
+    f64 coefMult = (f64)resampler->prediv * (f64)resampler->L;
+    
+    i_expect(outputCount >= ((inputCount * resampler->L) / resampler->M));
+    
+    u32 sampleStep = resampler->channelCount * resampler->sampleStep;
+    u32 coefOffset = 0;
+    u32 sampleIdx  = 0;
+    
+    for (u32 outIndex = 0; outIndex < outputCount; ++outIndex)
+    {
+        u32 cIdx = coefOffset * resampler->prediv;
+        s32 sIdx = sampleIdx;
+        
+        f64 sample0 = 0.0;
+        f64 sample1 = 0.0;
+        while (cIdx < resampler->coefCount)
+        {
+            sample0 += coefMult * resampler->coefs[cIdx] * input[sIdx+0];
+            sample1 += coefMult * resampler->coefs[cIdx] * input[sIdx+1];
+            cIdx += resampler->L * resampler->prediv;
+            sIdx -= resampler->channelCount;
+            if (sIdx < 0) {
+                break;
+            }
+        }
+        output[2 * outIndex + 0] = sample0;
+        output[2 * outIndex + 1] = sample1;
+        
+        u32 prevOffset = coefOffset;
+        coefOffset = (coefOffset + resampler->M) % resampler->L;
+        sampleIdx += sampleStep + ((prevOffset > coefOffset) ? resampler->channelCount : 0);
+    }
+    i_expect(sampleIdx == (inputCount * resampler->channelCount));
+}
+
+internal void
 resample_chunk(Resampler *resampler, u32 inputCount, f64 *input, u32 outputCount, f64 *output)
 {
     i_expect(outputCount >= ((inputCount * resampler->L) / resampler->M));
@@ -421,7 +460,7 @@ int main(int argc, char **argv)
                 INVALID_DEFAULT_CASE;
             }
             
-#if 1
+#if 0
             {
                 u32 chunkSize = 4096;
                 u32 chunkCount = inputCount / chunkSize;
@@ -445,7 +484,11 @@ int main(int argc, char **argv)
                 }
             }
 #else
-            resample(resampler, inputCount, inputSamples, outputCount, outputSamples);
+            if (resampler->channelCount == 2) {
+                resample_2ch_interleaved(resampler, inputCount, inputSamples, outputCount, outputSamples);
+            } else {
+                resample(resampler, inputCount, inputSamples, outputCount, outputSamples);
+            }
 #endif
             f64 maxSample = 0.0;
             f64 minSample = 0.0;

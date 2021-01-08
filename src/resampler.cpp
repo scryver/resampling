@@ -64,9 +64,6 @@ create_resampler(MemoryArena *memory, u32 channelCount, u32 fin, u32 fout, u32 f
     result->fsOut = fout;
     result->fsMain = fmain;
     
-    result->coefCount = coefCount;
-    result->coefs = coefs;
-    
     result->prediv = 1;
     result->L = fmain / fin;
     result->M = fmain / fout;
@@ -100,13 +97,22 @@ create_resampler(MemoryArena *memory, u32 channelCount, u32 fin, u32 fout, u32 f
         fprintf(stderr, "No resampling needed!\n");
     }
     
+    result->coefCount = coefCount / result->prediv;
+    result->coefs = arena_allocate_array(memory, f64, result->coefCount, default_memory_alloc());
     result->coefMult = (f64)result->prediv * (f64)result->L;
+    
+    f64 *c = result->coefs;
+    for (u32 index = 0; index < coefCount; index += result->prediv)
+    {
+        *c++ = result->coefMult * coefs[index];
+    }
+    
     result->coefOffset = 0;
     result->sampleStep = result->M / result->L;
     result->sampleIdx = 0;
     
     result->channelCount = channelCount;
-    result->delayCount = channelCount * (coefCount / result->prediv + 1);
+    result->delayCount = channelCount * (result->coefCount + 1);
     result->delayBuf = arena_allocate_array(memory, f64, result->delayCount, default_memory_alloc());
     
     return result;
@@ -115,8 +121,6 @@ create_resampler(MemoryArena *memory, u32 channelCount, u32 fin, u32 fout, u32 f
 internal void
 resample(Resampler *resampler, u32 inputCount, f64 *input, u32 outputCount, f64 *output)
 {
-    f64 coefMult = (f64)resampler->prediv * (f64)resampler->L;
-    
     i_expect(outputCount >= ((inputCount * resampler->L) / resampler->M));
     
     u32 sampleStep = resampler->channelCount * resampler->sampleStep;
@@ -127,14 +131,14 @@ resample(Resampler *resampler, u32 inputCount, f64 *input, u32 outputCount, f64 
     {
         for (u32 chanIdx = 0; chanIdx < resampler->channelCount; ++chanIdx)
         {
-            u32 cIdx = coefOffset * resampler->prediv;
+            u32 cIdx = coefOffset;
             s32 sIdx = sampleIdx + chanIdx;
             
             f64 sample = 0.0;
             while (cIdx < resampler->coefCount)
             {
-                sample += coefMult * resampler->coefs[cIdx] * input[sIdx];
-                cIdx += resampler->L * resampler->prediv;
+                sample += resampler->coefs[cIdx] * input[sIdx];
+                cIdx += resampler->L;
                 sIdx -= resampler->channelCount;
                 if (sIdx < 0) {
                     break;
@@ -154,8 +158,6 @@ internal void
 resample_2ch_interleaved(Resampler *resampler, u32 inputCount, f64 *input, u32 outputCount, f64 *output)
 {
     i_expect(resampler->channelCount == 2);
-    f64 coefMult = (f64)resampler->prediv * (f64)resampler->L;
-    
     i_expect(outputCount >= ((inputCount * resampler->L) / resampler->M));
     
     u32 sampleStep = resampler->channelCount * resampler->sampleStep;
@@ -164,16 +166,16 @@ resample_2ch_interleaved(Resampler *resampler, u32 inputCount, f64 *input, u32 o
     
     for (u32 outIndex = 0; outIndex < outputCount; ++outIndex)
     {
-        u32 cIdx = coefOffset * resampler->prediv;
+        u32 cIdx = coefOffset;
         s32 sIdx = sampleIdx;
         
         f64 sample0 = 0.0;
         f64 sample1 = 0.0;
         while (cIdx < resampler->coefCount)
         {
-            sample0 += coefMult * resampler->coefs[cIdx] * input[sIdx+0];
-            sample1 += coefMult * resampler->coefs[cIdx] * input[sIdx+1];
-            cIdx += resampler->L * resampler->prediv;
+            sample0 += resampler->coefs[cIdx] * input[sIdx+0];
+            sample1 += resampler->coefs[cIdx] * input[sIdx+1];
+            cIdx += resampler->L;
             sIdx -= resampler->channelCount;
             if (sIdx < 0) {
                 break;
@@ -201,7 +203,7 @@ resample_chunk(Resampler *resampler, u32 inputCount, f64 *input, u32 outputCount
     {
         for (u32 chanIdx = 0; chanIdx < resampler->channelCount; ++chanIdx)
         {
-            u32 cIdx = resampler->coefOffset * resampler->prediv;
+            u32 cIdx = resampler->coefOffset;
             s32 sIdx = sampleIdx + chanIdx;
             
             f64 sample = 0.0;
@@ -210,11 +212,11 @@ resample_chunk(Resampler *resampler, u32 inputCount, f64 *input, u32 outputCount
                 if (sIdx < 0) {
                     u32 delayIdx = resampler->delayCount + sIdx;
                     i_expect(delayIdx < resampler->delayCount);
-                    sample += resampler->coefMult * resampler->coefs[cIdx] * resampler->delayBuf[delayIdx];
+                    sample += resampler->coefs[cIdx] * resampler->delayBuf[delayIdx];
                 } else {
-                    sample += resampler->coefMult * resampler->coefs[cIdx] * input[sIdx];
+                    sample += resampler->coefs[cIdx] * input[sIdx];
                 }
-                cIdx += resampler->L * resampler->prediv;
+                cIdx += resampler->L;
                 sIdx -= resampler->channelCount;
             }
             output[resampler->channelCount * outIndex + chanIdx] = sample;
@@ -258,7 +260,7 @@ resample_flush(Resampler *resampler, u32 outputCount, f64 *output)
     {
         for (u32 chanIdx = 0; chanIdx < resampler->channelCount; ++chanIdx)
         {
-            u32 cIdx = resampler->coefOffset * resampler->prediv;
+            u32 cIdx = resampler->coefOffset;
             s32 sIdx = sampleIdx + chanIdx;
             
             f64 sample = 0.0;
@@ -267,9 +269,9 @@ resample_flush(Resampler *resampler, u32 outputCount, f64 *output)
                 if (sIdx < 0) {
                     u32 delayIdx = resampler->delayCount + sIdx;
                     i_expect(delayIdx < resampler->delayCount);
-                    sample += resampler->coefMult * resampler->coefs[cIdx] * resampler->delayBuf[delayIdx];
+                    sample += resampler->coefs[cIdx] * resampler->delayBuf[delayIdx];
                 }
-                cIdx += resampler->L * resampler->prediv;
+                cIdx += resampler->L;
                 sIdx -= resampler->channelCount;
             }
             output[resampler->channelCount * outIndex + chanIdx] = sample;

@@ -25,7 +25,7 @@ def gauss(x):
 # Configuration.
 fS = 56448000  # Sampling rate.
 fL = 20400  # Cutoff frequency.
-coefCount = 500003  # Filter length, must be odd.
+coefCount = 400003  # Filter length, must be odd.
 beta = 7.857  # Kaiser window beta.
 
 # Compute sinc filter.
@@ -170,7 +170,7 @@ def do_resample(fgen, fin, fout):
 
     plt.show()
 
-#plot_filter()
-#plot_filter_response()
-#plot_coef_table()
-do_resample(11025, 88200, 384000)
+plot_filter()
+plot_filter_response()
+plot_coef_table()
+#do_resample(11025, 88200, 384000)

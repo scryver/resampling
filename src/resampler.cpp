@@ -218,6 +218,41 @@ resample_2ch_interleaved(Resampler *resampler, u32 inputCount, f64 *input, u32 o
     
     for (u32 outIndex = 0; outIndex < outputCount; ++outIndex)
     {
+#if 0
+        // NOTE(michiel): Linear increasing memory
+        f64 *coefs = resampler->coefs[resampler->L - coefOffset - 1];
+        //f64 *coefs = resampler->coefs[coefOffset];
+        s32 sIdx = sampleIdx - (2 * resampler->coefCount);
+        
+        u32 firstCoef = 0;
+        if (sIdx < 0) {
+            firstCoef = -(sIdx / 2);
+        }
+        
+#if 1
+        __m128d sample = _mm_set1_pd(0.0);
+        f64 *src = input + sIdx;
+        for (u32 cIdx = firstCoef; cIdx < resampler->coefCount; ++cIdx)
+        {
+            __m128d coef = _mm_set1_pd(coefs[cIdx]);
+            __m128d inp  = _mm_load_pd(src + 2*cIdx);
+            sample = _mm_add_pd(sample, _mm_mul_pd(coef, inp));
+        }
+        _mm_store_pd(output + 2 * outIndex, sample);
+#else
+        f64 sample0 = 0.0;
+        f64 sample1 = 0.0;
+        for (u32 cIdx = firstCoef; cIdx < resampler->coefCount; ++cIdx)
+        {
+            sample0 += coefs[cIdx] * input[sIdx + 2*cIdx+0];
+            sample1 += coefs[cIdx] * input[sIdx + 2*cIdx+1];
+        }
+        output[2 * outIndex + 0] = sample0;
+        output[2 * outIndex + 1] = sample1;
+#endif
+        
+#else
+        
         f64 *coefs = resampler->coefs[coefOffset];
         s32 sIdx = sampleIdx;
         
@@ -379,6 +414,7 @@ resample_2ch_interleaved(Resampler *resampler, u32 inputCount, f64 *input, u32 o
 #endif
             
         }
+#endif
 #endif
         
         u32 prevOffset = coefOffset;
@@ -731,9 +767,9 @@ int main(int argc, char **argv)
     return 0;
 #endif
     
-    u32 coefCount = 500003;
+    u32 coefCount = 400003;
     u32 sampleFreq = 56448000;
-    u32 cutoffFreq = 20500;
+    u32 cutoffFreq = 20400;
     
     f64 *coefs64 = load_or_create_coefs(static_string("data/base"), coefCount, sampleFreq, cutoffFreq);
     
@@ -1048,7 +1084,9 @@ int main(int argc, char **argv)
 #endif
                 f32 timing = linux_get_seconds_elapsed(startTime, linux_get_wall_clock());
                 u64 bytes = (u64)resampler->L * resampler->coefCount * sizeof(f64);
-                fprintf(stdout, "%6u: %f sec (%f usec/sample) (%lu kbytes)\n", outputFreq, timing, 1000000.0 * timing / (f64)outputCount, bytes / 1024);
+                f64 usecPerSample = 1000000.0 * timing / (f64)outputCount;
+                f64 nsecPerTap = 1000.0 * usecPerSample / (f64)resampler->coefCount;
+                fprintf(stdout, "%6u: %f sec (%f usec/sample) (%f nsec/tap) (%lu kbytes)\n", outputFreq, timing, usecPerSample, nsecPerTap, bytes / 1024);
                 totalBytes += bytes;
                 totalSecs += timing;
                 
@@ -1117,7 +1155,15 @@ int main(int argc, char **argv)
             }
         }
 #else
+#if DO_STEREO_OPT
+        if (resampler->channelCount == 2) {
+            resample_2ch_interleaved(resampler, inputCount, input, outputCount, output);
+        } else {
+            resample(resampler, inputCount, input, outputCount, output);
+        }
+#else
         resample(resampler, inputCount, input, outputCount, output);
+#endif
 #endif
         
         WavSettings inputWav = {};

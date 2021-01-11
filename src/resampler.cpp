@@ -256,7 +256,7 @@ resample_2ch_interleaved(Resampler *resampler, u32 inputCount, f64 *input, u32 o
         f64 *coefs = resampler->coefs[coefOffset];
         s32 sIdx = sampleIdx;
         
-#if 0
+#if 1
         if (sIdx < 2 * resampler->coefCount)
         {
 #if 1
@@ -292,16 +292,72 @@ resample_2ch_interleaved(Resampler *resampler, u32 inputCount, f64 *input, u32 o
         else
         {
 #if 1
-            __m128d sample = _mm_set1_pd(0.0);
-            f64 *src = input + sIdx;
+            // NOTE(michiel): What we learn here is that the trick is to create more independent instruction so none of the ALUs starve.
+            __m128d sample0 = _mm_set1_pd(0.0);
+            f64 *src0 = input + sIdx;
+            
+            u32 prevOffset = coefOffset;
+            coefOffset = (coefOffset + resampler->M) % resampler->L;
+            sampleIdx += sampleStep + ((prevOffset > coefOffset) ? 2 : 0);
+            
+            sIdx = sampleIdx;
+            __m128d sample1 = _mm_set1_pd(0.0);
+            f64 *src1 = input + sIdx;
+            f64 *coefs1 = resampler->coefs[coefOffset];
+            
+            prevOffset = coefOffset;
+            coefOffset = (coefOffset + resampler->M) % resampler->L;
+            sampleIdx += sampleStep + ((prevOffset > coefOffset) ? 2 : 0);
+            
+            sIdx = sampleIdx;
+            __m128d sample2 = _mm_set1_pd(0.0);
+            f64 *src2 = input + sIdx;
+            f64 *coefs2 = resampler->coefs[coefOffset];
+            
+            prevOffset = coefOffset;
+            coefOffset = (coefOffset + resampler->M) % resampler->L;
+            sampleIdx += sampleStep + ((prevOffset > coefOffset) ? 2 : 0);
+            
+            sIdx = sampleIdx;
+            __m128d sample3 = _mm_set1_pd(0.0);
+            f64 *src3 = input + sIdx;
+            f64 *coefs3 = resampler->coefs[coefOffset];
+            
             for (u32 cIdx = 0; cIdx < resampler->coefCount; ++cIdx)
             {
-                __m128d coef = _mm_set1_pd(coefs[cIdx]);
-                __m128d inp  = _mm_load_pd(src);
-                sample = _mm_add_pd(sample, _mm_mul_pd(coef, inp));
-                src -= 2;
+                __m128d coef0 = _mm_set1_pd(coefs[cIdx]);
+                __m128d inp0  = _mm_load_pd(src0);
+                sample0 = _mm_add_pd(sample0, _mm_mul_pd(coef0, inp0));
+                src0 -= 2;
+                
+                __m128d coef1 = _mm_set1_pd(coefs1[cIdx]);
+                __m128d inp1  = _mm_load_pd(src1);
+                sample1 = _mm_add_pd(sample1, _mm_mul_pd(coef1, inp1));
+                src1 -= 2;
+                
+                __m128d coef2 = _mm_set1_pd(coefs2[cIdx]);
+                __m128d inp2  = _mm_load_pd(src2);
+                sample2 = _mm_add_pd(sample2, _mm_mul_pd(coef2, inp2));
+                src2 -= 2;
+                
+                __m128d coef3 = _mm_set1_pd(coefs3[cIdx]);
+                __m128d inp3  = _mm_load_pd(src3);
+                sample3 = _mm_add_pd(sample3, _mm_mul_pd(coef3, inp3));
+                src3 -= 2;
             }
-            _mm_store_pd(output + 2 * outIndex, sample);
+            _mm_store_pd(output + 2 * outIndex, sample0);
+            ++outIndex;
+            if (outIndex < outputCount) {
+                _mm_store_pd(output + 2 * outIndex, sample1);
+            }
+            ++outIndex;
+            if (outIndex < outputCount) {
+                _mm_store_pd(output + 2 * outIndex, sample2);
+            }
+            ++outIndex;
+            if (outIndex < outputCount) {
+                _mm_store_pd(output + 2 * outIndex, sample3);
+            }
 #else
             f64 sample0 = 0.0;
             f64 sample1 = 0.0;
@@ -421,7 +477,8 @@ resample_2ch_interleaved(Resampler *resampler, u32 inputCount, f64 *input, u32 o
         coefOffset = (coefOffset + resampler->M) % resampler->L;
         sampleIdx += sampleStep + ((prevOffset > coefOffset) ? 2 : 0);
     }
-    i_expect(sampleIdx == (inputCount * 2));
+    //i_expect(sampleIdx == (inputCount * 2));
+    i_expect(sampleIdx >= (inputCount * 2));
 }
 
 internal void
@@ -767,9 +824,9 @@ int main(int argc, char **argv)
     return 0;
 #endif
     
-    u32 coefCount = 400003;
+    u32 coefCount = 500003;
     u32 sampleFreq = 56448000;
-    u32 cutoffFreq = 20400;
+    u32 cutoffFreq = 20500;
     
     f64 *coefs64 = load_or_create_coefs(static_string("data/base"), coefCount, sampleFreq, cutoffFreq);
     

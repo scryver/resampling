@@ -1,4 +1,4 @@
-#define DO_CHUNKED         0
+#define DO_CHUNKED         1
 #define DO_STEREO_OPT      1
 
 #define CHUNK_SIZE         8192
@@ -162,7 +162,7 @@ create_resampler(MemoryArena *memory, u32 channelCount, u32 fin, u32 fout, u32 f
     
     result->channelCount = channelCount;
     result->delayCount = channelCount * (result->L * result->coefCount);
-    result->delayBuf = arena_allocate_array(memory, f64, result->delayCount, default_memory_alloc());
+    result->delayBuf = arena_allocate_array(memory, f64, result->delayCount, align_memory_alloc(16));
     
     return result;
 }
@@ -200,13 +200,13 @@ resample(Resampler *resampler, u32 inputCount, f64 *input, u32 outputCount, f64 
         coefOffset = (coefOffset + resampler->M) % resampler->L;
         sampleIdx += sampleStep + ((prevOffset > coefOffset) ? resampler->channelCount : 0);
     }
+    fprintf(stderr, "s: %u, %u\n", sampleIdx, inputCount * resampler->channelCount);
     i_expect(sampleIdx == (inputCount * resampler->channelCount));
 }
 
 internal void
 resample_2ch_interleaved(Resampler *resampler, u32 inputCount, f64 *input, u32 outputCount, f64 *output)
 {
-    // NOTE(michiel): Idee om te proberen is de coefOffset inverteren en dan beide arrays laten optellen
     i_expect(resampler->channelCount == 2);
     i_expect(outputCount >= ((inputCount * resampler->L) / resampler->M));
     i_expect(((umm)input & 0xF) == 0);
@@ -218,48 +218,11 @@ resample_2ch_interleaved(Resampler *resampler, u32 inputCount, f64 *input, u32 o
     
     for (u32 outIndex = 0; outIndex < outputCount; ++outIndex)
     {
-#if 0
-        // NOTE(michiel): Linear increasing memory
-        f64 *coefs = resampler->coefs[resampler->L - coefOffset - 1];
-        //f64 *coefs = resampler->coefs[coefOffset];
-        s32 sIdx = sampleIdx - (2 * resampler->coefCount);
-        
-        u32 firstCoef = 0;
-        if (sIdx < 0) {
-            firstCoef = -(sIdx / 2);
-        }
-        
-#if 1
-        __m128d sample = _mm_set1_pd(0.0);
-        f64 *src = input + sIdx;
-        for (u32 cIdx = firstCoef; cIdx < resampler->coefCount; ++cIdx)
-        {
-            __m128d coef = _mm_set1_pd(coefs[cIdx]);
-            __m128d inp  = _mm_load_pd(src + 2*cIdx);
-            sample = _mm_add_pd(sample, _mm_mul_pd(coef, inp));
-        }
-        _mm_store_pd(output + 2 * outIndex, sample);
-#else
-        f64 sample0 = 0.0;
-        f64 sample1 = 0.0;
-        for (u32 cIdx = firstCoef; cIdx < resampler->coefCount; ++cIdx)
-        {
-            sample0 += coefs[cIdx] * input[sIdx + 2*cIdx+0];
-            sample1 += coefs[cIdx] * input[sIdx + 2*cIdx+1];
-        }
-        output[2 * outIndex + 0] = sample0;
-        output[2 * outIndex + 1] = sample1;
-#endif
-        
-#else
-        
         f64 *coefs = resampler->coefs[coefOffset];
         s32 sIdx = sampleIdx;
         
-#if 1
         if (sIdx < 2 * resampler->coefCount)
         {
-#if 1
             __m128d sample = _mm_set1_pd(0.0);
             f64 *src = input + sIdx;
             for (u32 cIdx = 0; cIdx < resampler->coefCount; ++cIdx)
@@ -273,25 +236,9 @@ resample_2ch_interleaved(Resampler *resampler, u32 inputCount, f64 *input, u32 o
                 }
             }
             _mm_store_pd(output + 2 * outIndex, sample);
-#else
-            f64 sample0 = 0.0;
-            f64 sample1 = 0.0;
-            for (u32 cIdx = 0; cIdx < resampler->coefCount; ++cIdx)
-            {
-                sample0 += coefs[cIdx] * input[sIdx+0];
-                sample1 += coefs[cIdx] * input[sIdx+1];
-                sIdx -= 2;
-                if (sIdx < 0) {
-                    break;
-                }
-            }
-            output[2 * outIndex + 0] = sample0;
-            output[2 * outIndex + 1] = sample1;
-#endif
         }
         else
         {
-#if 1
             // NOTE(michiel): What we learn here is that the trick is to create more independent instruction so none of the ALUs starve.
             __m128d sample0 = _mm_set1_pd(0.0);
             f64 *src0 = input + sIdx;
@@ -346,132 +293,19 @@ resample_2ch_interleaved(Resampler *resampler, u32 inputCount, f64 *input, u32 o
                 src3 -= 2;
             }
             _mm_store_pd(output + 2 * outIndex, sample0);
-            ++outIndex;
-            if (outIndex < outputCount) {
+            if (outIndex < (outputCount - 1)) {
+                ++outIndex;
                 _mm_store_pd(output + 2 * outIndex, sample1);
             }
-            ++outIndex;
-            if (outIndex < outputCount) {
+            if (outIndex < (outputCount - 1)) {
+                ++outIndex;
                 _mm_store_pd(output + 2 * outIndex, sample2);
             }
-            ++outIndex;
-            if (outIndex < outputCount) {
+            if (outIndex < (outputCount - 1)) {
+                ++outIndex;
                 _mm_store_pd(output + 2 * outIndex, sample3);
             }
-#else
-            f64 sample0 = 0.0;
-            f64 sample1 = 0.0;
-            for (u32 cIdx = 0; cIdx < resampler->coefCount; ++cIdx)
-            {
-                sample0 += coefs[cIdx] * input[sIdx+0];
-                sample1 += coefs[cIdx] * input[sIdx+1];
-                sIdx -= 2;
-            }
-            output[2 * outIndex + 0] = sample0;
-            output[2 * outIndex + 1] = sample1;
-#endif
         }
-#else
-        if (sIdx < 2 * resampler->coefCount)
-        {
-            f64 sample0 = 0.0;
-            f64 sample1 = 0.0;
-            for (u32 cIdx = 0; cIdx < resampler->coefCount / 4; ++cIdx)
-            {
-                sample0 += coefs[4*cIdx + 0] * input[sIdx+0];
-                sample1 += coefs[4*cIdx + 0] * input[sIdx+1];
-                sIdx -= 2;
-                if (sIdx < 0) {
-                    break;
-                }
-                sample0 += coefs[4*cIdx + 1] * input[sIdx+0];
-                sample1 += coefs[4*cIdx + 1] * input[sIdx+1];
-                sIdx -= 2;
-                if (sIdx < 0) {
-                    break;
-                }
-                sample0 += coefs[4*cIdx + 2] * input[sIdx+0];
-                sample1 += coefs[4*cIdx + 2] * input[sIdx+1];
-                sIdx -= 2;
-                if (sIdx < 0) {
-                    break;
-                }
-                sample0 += coefs[4*cIdx + 3] * input[sIdx+0];
-                sample1 += coefs[4*cIdx + 3] * input[sIdx+1];
-                sIdx -= 2;
-                if (sIdx < 0) {
-                    break;
-                }
-            }
-            for (u32 cIdx = 0; cIdx < resampler->coefOffset % 4; ++cIdx)
-            {
-                sample0 += coefs[resampler->coefCount - ((resampler->coefOffset % 4) - cIdx)] * input[sIdx+0];
-                sample1 += coefs[resampler->coefCount - ((resampler->coefOffset % 4) - cIdx)] * input[sIdx+1];
-                sIdx -= 2;
-                if (sIdx < 0) {
-                    break;
-                }
-            }
-            output[2 * outIndex + 0] = sample0;
-            output[2 * outIndex + 1] = sample1;
-        }
-        else
-        {
-            __m128d sample = _mm_set1_pd(0.0);
-            f64 *src = input + sIdx;
-            for (u32 cIdx = 0; cIdx < resampler->coefCount / 4; ++cIdx)
-            {
-                __m128d coef = _mm_set1_pd(coefs[4*cIdx + 0]);
-                __m128d inp  = _mm_load_pd(src + 0);
-                sample = _mm_add_pd(sample, _mm_mul_pd(coef, inp));
-                coef = _mm_set1_pd(coefs[4*cIdx + 1]);
-                inp  = _mm_load_pd(src - 2);
-                sample = _mm_add_pd(sample, _mm_mul_pd(coef, inp));
-                coef = _mm_set1_pd(coefs[4*cIdx + 2]);
-                inp  = _mm_load_pd(src - 4);
-                sample = _mm_add_pd(sample, _mm_mul_pd(coef, inp));
-                coef = _mm_set1_pd(coefs[4*cIdx + 3]);
-                inp  = _mm_load_pd(src - 6);
-                sample = _mm_add_pd(sample, _mm_mul_pd(coef, inp));
-                src -= 8;
-            }
-            for (u32 cIdx = 0; cIdx < resampler->coefOffset % 4; ++cIdx)
-            {
-                __m128d coef = _mm_set1_pd(coefs[resampler->coefCount - ((resampler->coefOffset % 4) - cIdx)]);
-                __m128d inp  = _mm_load_pd(src);
-                sample = _mm_add_pd(sample, _mm_mul_pd(coef, inp));
-                src -= 2;
-            }
-            _mm_store_pd(output + 2 * outIndex, sample);
-            
-#if 0            
-            f64 sample0 = 0.0;
-            f64 sample1 = 0.0;
-            for (u32 cIdx = 0; cIdx < resampler->coefCount / 4; ++cIdx)
-            {
-                sample0 += coefs[4*cIdx + 0] * input[sIdx+0];
-                sample1 += coefs[4*cIdx + 0] * input[sIdx+1];
-                sample0 += coefs[4*cIdx + 1] * input[sIdx-2];
-                sample1 += coefs[4*cIdx + 1] * input[sIdx-1];
-                sample0 += coefs[4*cIdx + 2] * input[sIdx-4];
-                sample1 += coefs[4*cIdx + 2] * input[sIdx-3];
-                sample0 += coefs[4*cIdx + 3] * input[sIdx-6];
-                sample1 += coefs[4*cIdx + 3] * input[sIdx-5];
-                sIdx -= 8;
-            }
-            for (u32 cIdx = 0; cIdx < resampler->coefOffset % 4; ++cIdx)
-            {
-                sample0 += coefs[resampler->coefCount - ((resampler->coefOffset % 4) - cIdx)] * input[sIdx+0];
-                sample1 += coefs[resampler->coefCount - ((resampler->coefOffset % 4) - cIdx)] * input[sIdx+1];
-                sIdx -= 2;
-            }
-            output[2 * outIndex + 0] = sample0;
-            output[2 * outIndex + 1] = sample1;
-#endif
-            
-        }
-#endif
-#endif
         
         u32 prevOffset = coefOffset;
         coefOffset = (coefOffset + resampler->M) % resampler->L;
@@ -532,7 +366,7 @@ resample_chunk(Resampler *resampler, u32 inputCount, f64 *input, u32 outputCount
         u32 remain = resampler->delayCount - totalInputCount;
         for (u32 index = 0; index < remain; ++index)
         {
-            resampler->delayBuf[index] = resampler->delayBuf[resampler->delayCount - remain + index];
+            resampler->delayBuf[index] = resampler->delayBuf[resampler->delayCount - remain + index - 1];
         }
         for (u32 index = remain; index < resampler->delayCount; ++index)
         {
@@ -589,7 +423,7 @@ resample_flush(Resampler *resampler, u32 outputCount, f64 *output)
         u32 remain = resampler->delayCount - sampleIdx;
         for (u32 index = 0; index < remain; ++index)
         {
-            resampler->delayBuf[index] = resampler->delayBuf[resampler->delayCount - remain + index];
+            resampler->delayBuf[index] = resampler->delayBuf[resampler->delayCount - remain + index - 1];
         }
         for (u32 index = remain; index < resampler->delayCount; ++index)
         {
@@ -607,36 +441,267 @@ resample_chunk_2ch_interleaved(Resampler *resampler, u32 inputCount, f64 *input,
     
     u32 sampleStep = 2 * resampler->sampleStep;
     s32 sampleIdx  = resampler->sampleIdx;
+    u32 coefOffset = resampler->coefOffset;
     
-    for (u32 outIndex = 0; outIndex < outputCount; ++outIndex)
+    f64 *delayBufEnd = resampler->delayBuf + resampler->delayCount;
+    
+    u32 outputDiv = outputCount / 4;
+    //u32 outputRem = outputCount % 4;
+    for (u32 outIndex = 0; outIndex < outputDiv; ++outIndex)
     {
-        f64 *coefs = resampler->coefs[resampler->coefOffset];
-        s32 sIdx = sampleIdx;
+        __m128d sample0 = _mm_setzero_pd();
+        __m128d sample1 = _mm_setzero_pd();
+        __m128d sample2 = _mm_setzero_pd();
+        __m128d sample3 = _mm_setzero_pd();
         
-        f64 sample0 = 0.0;
-        f64 sample1 = 0.0;
-        for (u32 cIdx = 0; cIdx < resampler->coefCount; ++cIdx)
+        if (sampleIdx < 2 * resampler->coefCount)
         {
-            if (sIdx < 0) {
-                i_expect(sIdx < -1);
-                u32 delayIdx = resampler->delayCount + sIdx;
-                i_expect(delayIdx < resampler->delayCount);
-                sample0 += coefs[cIdx] * resampler->delayBuf[delayIdx + 0];
-                sample1 += coefs[cIdx] * resampler->delayBuf[delayIdx + 1];
-            } else {
-                sample0 += coefs[cIdx] * input[sIdx + 0];
-                sample1 += coefs[cIdx] * input[sIdx + 1];
-            }
-            sIdx -= 2;
+            s32 sIdx0 = sampleIdx;
+            f64 *coefs0 = resampler->coefs[coefOffset];
             
-            output[2 * outIndex + 0] = sample0;
-            output[2 * outIndex + 1] = sample1;
+            u32 prevOffset = coefOffset;
+            coefOffset = (coefOffset + resampler->M) % resampler->L;
+            sampleIdx += sampleStep + ((prevOffset > coefOffset) ? 2 : 0);
+            
+            s32 sIdx1 = sampleIdx;
+            f64 *coefs1 = resampler->coefs[coefOffset];
+            
+            prevOffset = coefOffset;
+            coefOffset = (coefOffset + resampler->M) % resampler->L;
+            sampleIdx += sampleStep + ((prevOffset > coefOffset) ? 2 : 0);
+            
+            s32 sIdx2 = sampleIdx;
+            f64 *coefs2 = resampler->coefs[coefOffset];
+            
+            prevOffset = coefOffset;
+            coefOffset = (coefOffset + resampler->M) % resampler->L;
+            sampleIdx += sampleStep + ((prevOffset > coefOffset) ? 2 : 0);
+            
+            s32 sIdx3 = sampleIdx;
+            f64 *coefs3 = resampler->coefs[coefOffset];
+            
+            prevOffset = coefOffset;
+            coefOffset = (coefOffset + resampler->M) % resampler->L;
+            sampleIdx += sampleStep + ((prevOffset > coefOffset) ? 2 : 0);
+            
+            u32 cIdx = 0;
+            for (; (cIdx < resampler->coefCount) && (sIdx0 >= 0); ++cIdx)
+            {
+                __m128d inp0 = _mm_load_pd(input + sIdx0);
+                __m128d inp1 = _mm_load_pd(input + sIdx1);
+                __m128d inp2 = _mm_load_pd(input + sIdx2);
+                __m128d inp3 = _mm_load_pd(input + sIdx3);
+                __m128d coef0 = _mm_set1_pd(coefs0[cIdx]);
+                __m128d coef1 = _mm_set1_pd(coefs1[cIdx]);
+                __m128d coef2 = _mm_set1_pd(coefs2[cIdx]);
+                __m128d coef3 = _mm_set1_pd(coefs3[cIdx]);
+                sample0 = _mm_add_pd(sample0, _mm_mul_pd(coef0, inp0));
+                sample1 = _mm_add_pd(sample1, _mm_mul_pd(coef1, inp1));
+                sample2 = _mm_add_pd(sample2, _mm_mul_pd(coef2, inp2));
+                sample3 = _mm_add_pd(sample3, _mm_mul_pd(coef3, inp3));
+                sIdx0 -= 2;
+                sIdx1 -= 2;
+                sIdx2 -= 2;
+                sIdx3 -= 2;
+            }
+            
+            for (; (cIdx < resampler->coefCount) && (sIdx1 >= 0); ++cIdx)
+            {
+                __m128d inp0 = _mm_load_pd(delayBufEnd + sIdx0);
+                __m128d inp1 = _mm_load_pd(input + sIdx1);
+                __m128d inp2 = _mm_load_pd(input + sIdx2);
+                __m128d inp3 = _mm_load_pd(input + sIdx3);
+                __m128d coef0 = _mm_set1_pd(coefs0[cIdx]);
+                __m128d coef1 = _mm_set1_pd(coefs1[cIdx]);
+                __m128d coef2 = _mm_set1_pd(coefs2[cIdx]);
+                __m128d coef3 = _mm_set1_pd(coefs3[cIdx]);
+                sample0 = _mm_add_pd(sample0, _mm_mul_pd(coef0, inp0));
+                sample1 = _mm_add_pd(sample1, _mm_mul_pd(coef1, inp1));
+                sample2 = _mm_add_pd(sample2, _mm_mul_pd(coef2, inp2));
+                sample3 = _mm_add_pd(sample3, _mm_mul_pd(coef3, inp3));
+                sIdx0 -= 2;
+                sIdx1 -= 2;
+                sIdx2 -= 2;
+                sIdx3 -= 2;
+            }
+            
+            for (; (cIdx < resampler->coefCount) && (sIdx2 >= 0); ++cIdx)
+            {
+                __m128d inp0 = _mm_load_pd(delayBufEnd + sIdx0);
+                __m128d inp1 = _mm_load_pd(delayBufEnd + sIdx1);
+                __m128d inp2 = _mm_load_pd(input + sIdx2);
+                __m128d inp3 = _mm_load_pd(input + sIdx3);
+                __m128d coef0 = _mm_set1_pd(coefs0[cIdx]);
+                __m128d coef1 = _mm_set1_pd(coefs1[cIdx]);
+                __m128d coef2 = _mm_set1_pd(coefs2[cIdx]);
+                __m128d coef3 = _mm_set1_pd(coefs3[cIdx]);
+                sample0 = _mm_add_pd(sample0, _mm_mul_pd(coef0, inp0));
+                sample1 = _mm_add_pd(sample1, _mm_mul_pd(coef1, inp1));
+                sample2 = _mm_add_pd(sample2, _mm_mul_pd(coef2, inp2));
+                sample3 = _mm_add_pd(sample3, _mm_mul_pd(coef3, inp3));
+                sIdx0 -= 2;
+                sIdx1 -= 2;
+                sIdx2 -= 2;
+                sIdx3 -= 2;
+            }
+            
+            for (; (cIdx < resampler->coefCount) && (sIdx3 >= 0); ++cIdx)
+            {
+                __m128d inp0 = _mm_load_pd(delayBufEnd + sIdx0);
+                __m128d inp1 = _mm_load_pd(delayBufEnd + sIdx1);
+                __m128d inp2 = _mm_load_pd(delayBufEnd + sIdx2);
+                __m128d inp3 = _mm_load_pd(input + sIdx3);
+                __m128d coef0 = _mm_set1_pd(coefs0[cIdx]);
+                __m128d coef1 = _mm_set1_pd(coefs1[cIdx]);
+                __m128d coef2 = _mm_set1_pd(coefs2[cIdx]);
+                __m128d coef3 = _mm_set1_pd(coefs3[cIdx]);
+                sample0 = _mm_add_pd(sample0, _mm_mul_pd(coef0, inp0));
+                sample1 = _mm_add_pd(sample1, _mm_mul_pd(coef1, inp1));
+                sample2 = _mm_add_pd(sample2, _mm_mul_pd(coef2, inp2));
+                sample3 = _mm_add_pd(sample3, _mm_mul_pd(coef3, inp3));
+                sIdx0 -= 2;
+                sIdx1 -= 2;
+                sIdx2 -= 2;
+                sIdx3 -= 2;
+            }
+            
+            for (; cIdx < resampler->coefCount; ++cIdx)
+            {  
+                __m128d inp0 = _mm_load_pd(delayBufEnd + sIdx0);
+                __m128d inp1 = _mm_load_pd(delayBufEnd + sIdx1);
+                __m128d inp2 = _mm_load_pd(delayBufEnd + sIdx2);
+                __m128d inp3 = _mm_load_pd(delayBufEnd + sIdx3);
+                __m128d coef0 = _mm_set1_pd(coefs0[cIdx]);
+                __m128d coef1 = _mm_set1_pd(coefs1[cIdx]);
+                __m128d coef2 = _mm_set1_pd(coefs2[cIdx]);
+                __m128d coef3 = _mm_set1_pd(coefs3[cIdx]);
+                sample0 = _mm_add_pd(sample0, _mm_mul_pd(coef0, inp0));
+                sample1 = _mm_add_pd(sample1, _mm_mul_pd(coef1, inp1));
+                sample2 = _mm_add_pd(sample2, _mm_mul_pd(coef2, inp2));
+                sample3 = _mm_add_pd(sample3, _mm_mul_pd(coef3, inp3));
+                sIdx0 -= 2;
+                sIdx1 -= 2;
+                sIdx2 -= 2;
+                sIdx3 -= 2;
+            }
+            
+            _mm_store_pd(output + 2 * (4 * outIndex + 0), sample0);
+            _mm_store_pd(output + 2 * (4 * outIndex + 1), sample1);
+            _mm_store_pd(output + 2 * (4 * outIndex + 2), sample2);
+            _mm_store_pd(output + 2 * (4 * outIndex + 3), sample3);
         }
-        
-        u32 prevOffset = resampler->coefOffset;
-        resampler->coefOffset = (resampler->coefOffset + resampler->M) % resampler->L;
-        sampleIdx += sampleStep + ((prevOffset > resampler->coefOffset) ? 2 : 0);
+        else
+        {
+            f64 *src0 = input + sampleIdx;
+            f64 *coefs0 = resampler->coefs[coefOffset];
+            
+            u32 prevOffset = coefOffset;
+            coefOffset = (coefOffset + resampler->M) % resampler->L;
+            sampleIdx += sampleStep + ((prevOffset > coefOffset) ? 2 : 0);
+            
+            f64 *src1 = input + sampleIdx;
+            f64 *coefs1 = resampler->coefs[coefOffset];
+            
+            prevOffset = coefOffset;
+            coefOffset = (coefOffset + resampler->M) % resampler->L;
+            sampleIdx += sampleStep + ((prevOffset > coefOffset) ? 2 : 0);
+            
+            f64 *src2 = input + sampleIdx;
+            f64 *coefs2 = resampler->coefs[coefOffset];
+            
+            prevOffset = coefOffset;
+            coefOffset = (coefOffset + resampler->M) % resampler->L;
+            sampleIdx += sampleStep + ((prevOffset > coefOffset) ? 2 : 0);
+            
+            f64 *src3 = input + sampleIdx;
+            f64 *coefs3 = resampler->coefs[coefOffset];
+            
+            prevOffset = coefOffset;
+            coefOffset = (coefOffset + resampler->M) % resampler->L;
+            sampleIdx += sampleStep + ((prevOffset > coefOffset) ? 2 : 0);
+            
+            for (u32 cIdx = 0; cIdx < resampler->coefCount; ++cIdx)
+            {
+                __m128d inp0 = _mm_load_pd(src0);
+                __m128d inp1 = _mm_load_pd(src1);
+                __m128d inp2 = _mm_load_pd(src2);
+                __m128d inp3 = _mm_load_pd(src3);
+                
+                __m128d coef0 = _mm_set1_pd(coefs0[cIdx]);
+                __m128d coef1 = _mm_set1_pd(coefs1[cIdx]);
+                __m128d coef2 = _mm_set1_pd(coefs2[cIdx]);
+                __m128d coef3 = _mm_set1_pd(coefs3[cIdx]);
+                
+                sample0 = _mm_add_pd(sample0, _mm_mul_pd(coef0, inp0));
+                sample1 = _mm_add_pd(sample1, _mm_mul_pd(coef1, inp1));
+                sample2 = _mm_add_pd(sample2, _mm_mul_pd(coef2, inp2));
+                sample3 = _mm_add_pd(sample3, _mm_mul_pd(coef3, inp3));
+                
+                src0 -= 2;
+                src1 -= 2;
+                src2 -= 2;
+                src3 -= 2;
+            }
+            _mm_store_pd(output + 2 * (4 * outIndex + 0), sample0);
+            _mm_store_pd(output + 2 * (4 * outIndex + 1), sample1);
+            _mm_store_pd(output + 2 * (4 * outIndex + 2), sample2);
+            _mm_store_pd(output + 2 * (4 * outIndex + 3), sample3);
+        }
     }
+    
+    for (u32 outIndex = outputDiv * 4; outIndex < outputCount; ++outIndex)
+    {
+        __m128d sample = _mm_setzero_pd();
+        
+        if (sampleIdx < 2 * resampler->coefCount)
+        {
+            s32 sIdx = sampleIdx;
+            f64 *coefs = resampler->coefs[coefOffset];
+            
+            u32 prevOffset = coefOffset;
+            coefOffset = (coefOffset + resampler->M) % resampler->L;
+            sampleIdx += sampleStep + ((prevOffset > coefOffset) ? 2 : 0);
+            
+            u32 cIdx = 0;
+            for (; (cIdx < resampler->coefCount) && (sIdx >= 0); ++cIdx)
+            {
+                __m128d inp = _mm_load_pd(input + sIdx);
+                __m128d coef = _mm_set1_pd(coefs[cIdx]);
+                sample = _mm_add_pd(sample, _mm_mul_pd(coef, inp));
+                sIdx -= 2;
+            }
+            
+            for (; cIdx < resampler->coefCount; ++cIdx)
+            {
+                __m128d inp = _mm_load_pd(delayBufEnd + sIdx);
+                __m128d coef = _mm_set1_pd(coefs[cIdx]);
+                sample = _mm_add_pd(sample, _mm_mul_pd(coef, inp));
+                sIdx -= 2;
+            }
+            
+            _mm_store_pd(output + 2 * outIndex, sample);
+        }
+        else
+        {
+            f64 *src = input + sampleIdx;
+            f64 *coefs = resampler->coefs[coefOffset];
+            
+            u32 prevOffset = coefOffset;
+            coefOffset = (coefOffset + resampler->M) % resampler->L;
+            sampleIdx += sampleStep + ((prevOffset > coefOffset) ? 2 : 0);
+            
+            for (u32 cIdx = 0; cIdx < resampler->coefCount; ++cIdx)
+            {
+                __m128d inp = _mm_load_pd(src);
+                __m128d coef = _mm_set1_pd(coefs[cIdx]);
+                sample = _mm_add_pd(sample, _mm_mul_pd(coef, inp));
+                src -= 2;
+            }
+            _mm_store_pd(output + 2 * outIndex, sample);
+        }
+    }
+    
+    resampler->coefOffset = coefOffset;
     
     u32 totalInputCount = inputCount * 2;
     resampler->sampleIdx = sampleIdx - totalInputCount;
@@ -653,7 +718,7 @@ resample_chunk_2ch_interleaved(Resampler *resampler, u32 inputCount, f64 *input,
         u32 remain = resampler->delayCount - totalInputCount;
         for (u32 index = 0; index < remain; ++index)
         {
-            resampler->delayBuf[index] = resampler->delayBuf[resampler->delayCount - remain + index];
+            resampler->delayBuf[index] = resampler->delayBuf[resampler->delayCount - remain + index - 1];
         }
         for (u32 index = remain; index < resampler->delayCount; ++index)
         {
@@ -667,33 +732,109 @@ resample_flush_2ch_interleaved(Resampler *resampler, u32 outputCount, f64 *outpu
 {
     i_expect(resampler->channelCount == 2);
     b32 completeFlush = false;
+    u32 sampleStep = 2 * resampler->sampleStep;
     u32 sampleIdx = resampler->sampleIdx;
+    u32 coefOffset = resampler->coefOffset;
+    
+    f64 *delayBufEnd = resampler->delayBuf + resampler->delayCount;
     for (u32 outIndex = 0; outIndex < outputCount; ++outIndex)
     {
-        f64 *coefs = resampler->coefs[resampler->coefOffset];
-        s32 sIdx = sampleIdx;
+        __m128d sample0 = _mm_set1_pd(0.0);
+        __m128d sample1 = _mm_set1_pd(0.0);
+        __m128d sample2 = _mm_set1_pd(0.0);
+        __m128d sample3 = _mm_set1_pd(0.0);
         
-        f64 sample0 = 0.0;
-        f64 sample1 = 0.0;
+        s32 sIdx0 = sampleIdx;
+        f64 *coefs0 = resampler->coefs[coefOffset];
+        
+        u32 prevOffset = coefOffset;
+        coefOffset = (coefOffset + resampler->M) % resampler->L;
+        sampleIdx += sampleStep + ((prevOffset > coefOffset) ? 2 : 0);
+        
+        s32 sIdx1 = sampleIdx;
+        f64 *coefs1 = resampler->coefs[coefOffset];
+        
+        prevOffset = coefOffset;
+        coefOffset = (coefOffset + resampler->M) % resampler->L;
+        sampleIdx += sampleStep + ((prevOffset > coefOffset) ? 2 : 0);
+        
+        s32 sIdx2 = sampleIdx;
+        f64 *coefs2 = resampler->coefs[coefOffset];
+        
+        prevOffset = coefOffset;
+        coefOffset = (coefOffset + resampler->M) % resampler->L;
+        sampleIdx += sampleStep + ((prevOffset > coefOffset) ? 2 : 0);
+        
+        s32 sIdx3 = sampleIdx;
+        f64 *coefs3 = resampler->coefs[coefOffset];
+        
+        prevOffset = coefOffset;
+        coefOffset = (coefOffset + resampler->M) % resampler->L;
+        sampleIdx += sampleStep + ((prevOffset > coefOffset) ? 2 : 0);
+        
         for (u32 cIdx = 0; cIdx < resampler->coefCount; ++cIdx)
         {
-            if (sIdx < 0) {
-                i_expect(sIdx < -1);
-                u32 delayIdx = resampler->delayCount + sIdx;
-                i_expect(delayIdx < resampler->delayCount);
-                sample0 += coefs[cIdx] * resampler->delayBuf[delayIdx + 0];
-                sample1 += coefs[cIdx] * resampler->delayBuf[delayIdx + 1];
+            __m128d inp0;
+            __m128d inp1;
+            __m128d inp2;
+            __m128d inp3;
+            
+            if (sIdx0 < 0) {
+                inp0 = _mm_load_pd(delayBufEnd + sIdx0);
+            } else {
+                inp0 = _mm_setzero_pd();
             }
-            sIdx -= resampler->channelCount;
+            
+            if (sIdx1 < 0) {
+                inp1 = _mm_load_pd(delayBufEnd + sIdx0);
+            } else {
+                inp1 = _mm_setzero_pd();
+            }
+            
+            if (sIdx2 < 0) {
+                inp2 = _mm_load_pd(delayBufEnd + sIdx0);
+            } else {
+                inp2 = _mm_setzero_pd();
+            }
+            
+            if (sIdx3 < 0) {
+                inp3 = _mm_load_pd(delayBufEnd + sIdx0);
+            } else {
+                inp3 = _mm_setzero_pd();
+            }
+            
+            __m128d coef0 = _mm_set1_pd(coefs0[cIdx]);
+            __m128d coef1 = _mm_set1_pd(coefs1[cIdx]);
+            __m128d coef2 = _mm_set1_pd(coefs2[cIdx]);
+            __m128d coef3 = _mm_set1_pd(coefs3[cIdx]);
+            
+            sample0 = _mm_add_pd(sample0, _mm_mul_pd(coef0, inp0));
+            sample1 = _mm_add_pd(sample1, _mm_mul_pd(coef1, inp1));
+            sample2 = _mm_add_pd(sample2, _mm_mul_pd(coef2, inp2));
+            sample3 = _mm_add_pd(sample3, _mm_mul_pd(coef3, inp3));
+            
+            sIdx0 -= 2;
+            sIdx1 -= 2;
+            sIdx2 -= 2;
+            sIdx3 -= 2;
         }
-        output[2 * outIndex + 0] = sample0;
-        output[2 * outIndex + 1] = sample1;
         
-        u32 prevOffset = resampler->coefOffset;
-        resampler->coefOffset = (resampler->coefOffset + resampler->M) % resampler->L;
-        sampleIdx += 2 * (resampler->sampleStep + ((prevOffset > resampler->coefOffset) ? 1 : 0));
+        _mm_store_pd(output + 2 * outIndex, sample0);
+        if (outIndex < (outputCount - 1)) {
+            ++outIndex;
+            _mm_store_pd(output + 2 * outIndex, sample1);
+        }
+        if (outIndex < (outputCount - 1)) {
+            ++outIndex;
+            _mm_store_pd(output + 2 * outIndex, sample2);
+        }
+        if (outIndex < (outputCount - 1)) {
+            ++outIndex;
+            _mm_store_pd(output + 2 * outIndex, sample3);
+        }
     }
     
+    resampler->coefOffset = coefOffset;
     resampler->sampleIdx = sampleIdx;
     
     if (resampler->delayCount <= sampleIdx)
@@ -711,7 +852,7 @@ resample_flush_2ch_interleaved(Resampler *resampler, u32 outputCount, f64 *outpu
         u32 remain = resampler->delayCount - sampleIdx;
         for (u32 index = 0; index < remain; ++index)
         {
-            resampler->delayBuf[index] = resampler->delayBuf[resampler->delayCount - remain + index];
+            resampler->delayBuf[index] = resampler->delayBuf[resampler->delayCount - remain + index - 1];
         }
         for (u32 index = remain; index < resampler->delayCount; ++index)
         {
@@ -912,7 +1053,8 @@ int main(int argc, char **argv)
                         dst += chunkOutSize * resampler->channelCount;
                     }
                     
-                    while (!resample_flush_2ch_interleaved(resampler, chunkOutSize, dst))
+                    while (((dst + (chunkOutSize * resampler->channelCount)) <= (outputSamples + outputCount * resampler->channelCount)) &&
+                           !resample_flush_2ch_interleaved(resampler, chunkOutSize, dst))
                     {
                         i_expect(dst < (outputSamples + outputCount * resampler->channelCount));
                     }
@@ -928,7 +1070,8 @@ int main(int argc, char **argv)
                         dst += chunkOutSize * resampler->channelCount;
                     }
                     
-                    while (!resample_flush(resampler, chunkOutSize, dst))
+                    while (((dst + (chunkOutSize * resampler->channelCount)) <= (outputSamples + outputCount * resampler->channelCount)) &&
+                           !resample_flush(resampler, chunkOutSize, dst))
                     {
                         i_expect(dst < (outputSamples + outputCount * resampler->channelCount));
                     }
@@ -943,7 +1086,8 @@ int main(int argc, char **argv)
                     dst += chunkOutSize * resampler->channelCount;
                 }
                 
-                while (!resample_flush(resampler, chunkOutSize, dst))
+                while (((dst + (chunkOutSize * resampler->channelCount)) <= (outputSamples + outputCount * resampler->channelCount)) &&
+                       !resample_flush(resampler, chunkOutSize, dst))
                 {
                     i_expect(dst < (outputSamples + outputCount * resampler->channelCount));
                 }
@@ -1039,6 +1183,8 @@ int main(int argc, char **argv)
         u32 freqList[] = {44100, 48000, 88200, 96000, 176400, 192000, 352800, 384000};
         f64 totalSecs = 0.0;
         u64 totalBytes = 0;
+        Resampler *testStruct = arena_allocate_struct(&arena, Resampler, default_memory_alloc());
+        unused(testStruct);
         for (u32 inIdx = 0; inIdx < array_count(freqList); ++inIdx)
         {
             for (u32 outIdx = 0; outIdx < array_count(freqList); ++outIdx)
@@ -1054,7 +1200,7 @@ int main(int argc, char **argv)
                 f64 *inputSamples = arena_allocate_array(&arena, f64, channelCount * inputCount, align_memory_alloc(16));
                 
                 u32 outputCount = (inputCount * resampler->L) / resampler->M;
-                f64 *outputSamples = arena_allocate_array(&arena, f64, channelCount * outputCount, align_memory_alloc(16));
+                f64 *outputSamples = arena_allocate_array(&arena, f64, channelCount * outputCount + 2048, align_memory_alloc(16));
                 
                 for (u32 idx = 0; idx < inputCount; ++idx)
                 {
@@ -1076,6 +1222,8 @@ int main(int argc, char **argv)
                     // NOTE(michiel): Ignore last bit for now
                     u32 chunkOutSize = (chunkSize * resampler->L) / resampler->M;
                     
+                    f64 *srcEnd = inputSamples + inputCount * resampler->channelCount;
+                    f64 *dstEnd = outputSamples + outputCount * resampler->channelCount;
                     f64 *src = inputSamples;
                     f64 *dst = outputSamples;
 #if DO_STEREO_OPT
@@ -1083,6 +1231,8 @@ int main(int argc, char **argv)
                     {
                         for (u32 chunkIdx = 0; chunkIdx < chunkCount; ++chunkIdx)
                         {
+                            i_expect((src + chunkSize * resampler->channelCount) <= srcEnd);
+                            i_expect((dst + chunkOutSize * resampler->channelCount) <= dstEnd);
                             i_expect(src < (inputSamples + inputCount * resampler->channelCount));
                             i_expect(dst < (outputSamples + outputCount * resampler->channelCount));
                             resample_chunk_2ch_interleaved(resampler, chunkSize, src, chunkOutSize, dst);
@@ -1090,7 +1240,8 @@ int main(int argc, char **argv)
                             dst += chunkOutSize * resampler->channelCount;
                         }
                         
-                        while (!resample_flush_2ch_interleaved(resampler, chunkOutSize, dst))
+                        while (((dst + (chunkOutSize * resampler->channelCount)) <= (outputSamples + outputCount * resampler->channelCount)) &&
+                               !resample_flush_2ch_interleaved(resampler, chunkOutSize, dst))
                         {
                             i_expect(dst < (outputSamples + outputCount * resampler->channelCount));
                         }
@@ -1099,6 +1250,8 @@ int main(int argc, char **argv)
                     {
                         for (u32 chunkIdx = 0; chunkIdx < chunkCount; ++chunkIdx)
                         {
+                            i_expect((src + chunkSize * resampler->channelCount) <= srcEnd);
+                            i_expect((dst + chunkOutSize * resampler->channelCount) <= dstEnd);
                             i_expect(src < (inputSamples + inputCount * resampler->channelCount));
                             i_expect(dst < (outputSamples + outputCount * resampler->channelCount));
                             resample_chunk(resampler, chunkSize, src, chunkOutSize, dst);
@@ -1106,7 +1259,8 @@ int main(int argc, char **argv)
                             dst += chunkOutSize * resampler->channelCount;
                         }
                         
-                        while (!resample_flush(resampler, chunkOutSize, dst))
+                        while (((dst + (chunkOutSize * resampler->channelCount)) <= (outputSamples + outputCount * resampler->channelCount)) &&
+                               !resample_flush(resampler, chunkOutSize, dst))
                         {
                             i_expect(dst < (outputSamples + outputCount * resampler->channelCount));
                         }
@@ -1114,6 +1268,8 @@ int main(int argc, char **argv)
 #else
                     for (u32 chunkIdx = 0; chunkIdx < chunkCount; ++chunkIdx)
                     {
+                        i_expect((src + chunkSize * resampler->channelCount) <= srcEnd);
+                        i_expect((dst + chunkOutSize * resampler->channelCount) <= dstEnd);
                         i_expect(src < (inputSamples + inputCount * resampler->channelCount));
                         i_expect(dst < (outputSamples + outputCount * resampler->channelCount));
                         resample_chunk(resampler, chunkSize, src, chunkOutSize, dst);
@@ -1121,7 +1277,8 @@ int main(int argc, char **argv)
                         dst += chunkOutSize * resampler->channelCount;
                     }
                     
-                    while (!resample_flush(resampler, chunkOutSize, dst))
+                    while (((dst + (chunkOutSize * resampler->channelCount)) <= (outputSamples + outputCount * resampler->channelCount)) &&
+                           !resample_flush(resampler, chunkOutSize, dst))
                     {
                         i_expect(dst < (outputSamples + outputCount * resampler->channelCount));
                     }
@@ -1197,6 +1354,42 @@ int main(int argc, char **argv)
             
             f64 *src = input;
             f64 *dst = output;
+#if DO_STEREO_OPT
+            if (resampler->channelCount == 2)
+            {
+                for (u32 chunkIdx = 0; chunkIdx < chunkCount; ++chunkIdx)
+                {
+                    i_expect(src < (input + inputCount * resampler->channelCount));
+                    i_expect(dst < (output + outputCount * resampler->channelCount));
+                    resample_chunk_2ch_interleaved(resampler, chunkSize, src, chunkOutSize, dst);
+                    src += chunkSize * resampler->channelCount;
+                    dst += chunkOutSize * resampler->channelCount;
+                }
+                
+                while (((dst + (chunkOutSize * resampler->channelCount)) <= (output + outputCount * resampler->channelCount)) &&
+                       !resample_flush_2ch_interleaved(resampler, chunkOutSize, dst))
+                {
+                    i_expect(dst < (output + outputCount * resampler->channelCount));
+                }
+            }
+            else
+            {
+                for (u32 chunkIdx = 0; chunkIdx < chunkCount; ++chunkIdx)
+                {
+                    i_expect(src < (input + inputCount * resampler->channelCount));
+                    i_expect(dst < (output + outputCount * resampler->channelCount));
+                    resample_chunk(resampler, chunkSize, src, chunkOutSize, dst);
+                    src += chunkSize * resampler->channelCount;
+                    dst += chunkOutSize * resampler->channelCount;
+                }
+                
+                while (((dst + (chunkOutSize * resampler->channelCount)) <= (output + outputCount * resampler->channelCount)) &&
+                       !resample_flush(resampler, chunkOutSize, dst))
+                {
+                    i_expect(dst < (output + outputCount * resampler->channelCount));
+                }
+            }
+#else
             for (u32 chunkIdx = 0; chunkIdx < chunkCount; ++chunkIdx)
             {
                 i_expect(src < (input + inputCount * resampler->channelCount));
@@ -1206,10 +1399,12 @@ int main(int argc, char **argv)
                 dst += chunkOutSize * resampler->channelCount;
             }
             
-            while (resample_flush(resampler, chunkOutSize, dst))
+            while (((dst + (chunkOutSize * resampler->channelCount)) <= (output + outputCount * resampler->channelCount)) &&
+                   !resample_flush(resampler, chunkOutSize, dst))
             {
                 i_expect(dst < (output + outputCount));
             }
+#endif
         }
 #else
 #if DO_STEREO_OPT
